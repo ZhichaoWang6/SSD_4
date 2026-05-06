@@ -39,6 +39,10 @@ def parse_args():
                         help="Weight applied to per-token CE loss at and after the first "
                              "draft/verify mismatch. 1.0 = full weight everywhere; "
                              "0.0 = old behavior (only train on prefix).")
+    parser.add_argument("--hidden_loss_weight", type=float, default=0.0,
+                        help="Auxiliary smooth-L1 loss weight between adapter output hidden "
+                             "state and base final hidden state (verify_hidden_normed). "
+                             "0.0 = disabled. Recommended: 0.5.")
 
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--no_reply_keep_ratio", type=float, default=1.0)
@@ -174,6 +178,7 @@ def online_train_one_context(
     speculative_steps=6,
     threshold=0.0,
     post_mismatch_weight=0.3,
+    hidden_loss_weight=0.0,
     debug=False,
     debug_steps=6,
 ):
@@ -275,6 +280,7 @@ def online_train_one_context(
         exited_hidden_states = None
         draft_token_ids = []
         adapter_logits_list = []
+        adapter_hidden_list = []
 
         if debug:
             print(f"\n----- round {round_idx} -----")
@@ -313,6 +319,7 @@ def online_train_one_context(
             predict_score = adapter_logits.softmax(dim=-1).max().item()
 
             adapter_logits_list.append(adapter_logits[:, -1, :])
+            adapter_hidden_list.append(hidden_state[:, -1:, :])
             draft_token_ids.append(predicted_token.item())
 
             global_tokens[:, end_index] = predicted_token.item()
@@ -396,6 +403,21 @@ def online_train_one_context(
 
         ce_per_token = F.cross_entropy(adapter_logits_tensor, labels, reduction='none')
         loss = (ce_per_token * weights).sum() / weights.sum().clamp_min(1.0)
+
+        if hidden_loss_weight > 0 and effective_len > 0:
+            adapter_hidden_tensor = torch.cat(
+                adapter_hidden_list[:effective_len], dim=1,
+            )  # [1, effective_len, H]
+            target_hidden = verify_hidden_normed[:, :effective_len, :].detach()
+            h_per_token = F.smooth_l1_loss(
+                adapter_hidden_tensor.float(),
+                target_hidden.float(),
+                reduction='none',
+            ).mean(-1).squeeze(0)  # [effective_len]
+            hidden_loss = (h_per_token * weights).sum() / weights.sum().clamp_min(1.0)
+            loss = loss + hidden_loss_weight * hidden_loss
+            if debug:
+                print(f"[hidden_loss] {hidden_loss.item():.4f}")
 
         if total_loss is None:
             total_loss = loss * train_len
@@ -601,6 +623,7 @@ def main():
                     speculative_steps=args.speculative_steps,
                     threshold=args.threshold,
                     post_mismatch_weight=args.post_mismatch_weight,
+                    hidden_loss_weight=args.hidden_loss_weight,
                     debug=args.debug and global_step < args.debug_steps,
                     debug_steps=args.debug_steps,
                 )

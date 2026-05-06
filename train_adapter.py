@@ -53,6 +53,10 @@ def parse_args():
                              "Set to 5 to drop NO REPLY samples (which have exactly 5 mask tokens).")
     parser.add_argument("--filter_cache", type=str, default=None,
                         help="Optional path to cache the filtered file list (avoid rescanning).")
+    parser.add_argument("--hidden_loss_weight", type=float, default=0.0,
+                        help="Auxiliary smooth-L1 loss weight between adapter output hidden "
+                             "state and base final hidden state. 0.0 = disabled. "
+                             "Recommended: 0.5.")
     return parser.parse_args()
 
 
@@ -366,13 +370,25 @@ def main():
                 prob_acc_per_token = torch.min(prob_last, prob_exit).sum(dim=2)
 
                 loss_mask = data["loss_mask"][:, :, None]
-                loss = compute_distill_loss(
+                ce_loss = compute_distill_loss(
                     out_head=out_head,
                     target_head=target_head,
                     loss_mask=loss_mask,
                     mode=args.loss_mode,
                     temperature=args.kd_temperature,
                 )
+
+                if args.hidden_loss_weight > 0:
+                    h_per_token = F.smooth_l1_loss(
+                        predict.float(), data["target"].float(), reduction='none',
+                    ).mean(-1)  # [B, L]
+                    mask_2d = loss_mask.squeeze(-1)
+                    hidden_loss = (h_per_token * mask_2d).sum() / mask_2d.sum().clamp_min(1)
+                    loss = ce_loss + args.hidden_loss_weight * hidden_loss
+                else:
+                    hidden_loss = torch.zeros((), device=ce_loss.device)
+                    loss = ce_loss
+
                 prob_acc = torch.sum(data["loss_mask"] * prob_acc_per_token) / data["loss_mask"].sum().clamp(min=1)
 
                 nan_flag = torch.tensor(
@@ -389,9 +405,11 @@ def main():
 
                 if accelerator.is_main_process and batch_idx % args.log_steps == 0:
                     long_conf_avg = long_confidence_sum / max(long_total, 1.0)
+                    h_loss_str = f"\tHLoss: {hidden_loss.item():.4f}" if args.hidden_loss_weight > 0 else ""
                     print(
                         f"\nStep: {batch_idx}\tLR: {optimizer.optimizer.param_groups[0]['lr']:.6f}"
                         f"\tAccept: {prob_acc.item():.4f}\tLoss: {loss.item():.4f}"
+                        f"\tCE: {ce_loss.item():.4f}{h_loss_str}"
                         f"\tLong_conf: {long_conf_avg:.4f}"
                     )
 
