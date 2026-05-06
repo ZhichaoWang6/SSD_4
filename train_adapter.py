@@ -48,6 +48,11 @@ def parse_args():
                              "hard_ce: cross-entropy on teacher argmax (most aggressive).")
     parser.add_argument("--kd_temperature", type=float, default=0.5,
                         help="Temperature for sharp_kd. <1.0 sharpens teacher distribution.")
+    parser.add_argument("--min_mask_tokens", type=int, default=0,
+                        help="Skip samples whose loss_mask.sum() <= this. "
+                             "Set to 5 to drop NO REPLY samples (which have exactly 5 mask tokens).")
+    parser.add_argument("--filter_cache", type=str, default=None,
+                        help="Optional path to cache the filtered file list (avoid rescanning).")
     return parser.parse_args()
 
 
@@ -58,6 +63,39 @@ def list_files(path):
             if file.endswith(".ckpt"):
                 datapath.append(os.path.join(root, file))
     return sorted(datapath)
+
+
+def filter_by_mask_tokens(files, min_mask_tokens, cache_path=None):
+    """Keep only files with loss_mask.sum() > min_mask_tokens. Caches the result."""
+    if min_mask_tokens <= 0:
+        return files
+
+    if cache_path and os.path.exists(cache_path):
+        with open(cache_path, "r") as f:
+            cached = json.load(f)
+        if cached.get("min_mask_tokens") == min_mask_tokens and set(cached.get("source_files", [])) == set(files):
+            print(f"[filter] loaded {len(cached['kept_files'])} files from cache {cache_path}")
+            return cached["kept_files"]
+
+    kept = []
+    print(f"[filter] scanning {len(files)} ckpts (min_mask_tokens > {min_mask_tokens})...")
+    for i, f in enumerate(files):
+        try:
+            d = torch.load(f, map_location="cpu", weights_only=False)
+            if int(d["loss_mask"].sum().item()) > min_mask_tokens:
+                kept.append(f)
+        except Exception as e:
+            print(f"  [skip] {f}: {e}")
+        if (i + 1) % 500 == 0:
+            print(f"  scanned {i+1}/{len(files)}, kept {len(kept)}")
+    print(f"[filter] kept {len(kept)}/{len(files)} ({100*len(kept)/max(len(files),1):.1f}%)")
+
+    if cache_path:
+        os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+        with open(cache_path, "w") as f:
+            json.dump({"min_mask_tokens": min_mask_tokens, "source_files": files, "kept_files": kept}, f)
+        print(f"[filter] cached to {cache_path}")
+    return kept
 
 
 class AdapterDataset(Dataset):
@@ -236,6 +274,10 @@ def main():
     datapath = list_files(args.datadir)
     if not datapath:
         raise ValueError(f"No .ckpt files found in {args.datadir}")
+
+    datapath = filter_by_mask_tokens(datapath, args.min_mask_tokens, args.filter_cache)
+    if not datapath:
+        raise ValueError(f"No samples left after filter (min_mask_tokens={args.min_mask_tokens})")
 
     print(f"Training: {len(datapath)} samples")
 
