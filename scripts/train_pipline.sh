@@ -1,0 +1,15 @@
+CUDA_VISIBLE_DEVICES=6 python train_online_kangaroo.py \
+  --model_path /data/wangzhichao/projects/MMDuet2/ckpt/MMDuet2_ckpt \
+  --data_path /data/wangzhichao/projects/SSD_full_history/data/annotations/adapter/all.jsonl \
+  --outdir /data/wangzhichao/projects/SSD_full_history/adapter_checkpoints/TWO_online_layer2_ratio01_steps8 \
+  --exit_layer 2 \
+  --device cuda:0 \
+  --lr 1e-6 \
+  --adapter_path /data/wangzhichao/projects/SSD_full_history/adapter_checkpoints/MLP/all_my_ar_0.1_no_reply_2/epochs/epoch019_acc0.8834_accept0.8976_loss0.5550 \
+  --num_epochs 60 \
+  --num_warmup_steps 100 \
+  --max_new_tokens 128 \
+  --answer_margin_tokens 4 \
+  --speculative_steps 8 \
+  --threshold 0.0 \
+  --no_reply_keep_ratio 0.0

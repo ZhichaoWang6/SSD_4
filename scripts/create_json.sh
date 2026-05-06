@@ -1,0 +1,12 @@
+CUDA_VISIBLE_DEVICES=5 python generate_streaming_ar_from_sft.py \
+    --input_jsonl /data/wangzhichao/datasets/MMDuet2-data/sft/egoexo4d-half_multi_half_single_question-2_sec_per_frame-sft.jsonl \
+    --output_json /data/wangzhichao/projects/SSD_full_history/data/annotations/adapter/egoexo4d_ar_sft_train_my_ar.json \
+    --model_path /data/wangzhichao/projects/MMDuet2/ckpt/MMDuet2_ckpt \
+    --image_root /data/wangzhichao/datasets/Ego-Exo4D/frames \
+    --strip_prefix ./data/datasets/Ego-Exo4D/frames \
+    --generate_replies \
+    --exit_layer 2 \
+    --device cuda:0 \
+    --max_new_tokens 512 \
+    --attn_implementation flash_attention_2 \
+    --manual_ar
