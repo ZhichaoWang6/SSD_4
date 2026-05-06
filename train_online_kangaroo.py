@@ -395,11 +395,14 @@ def online_train_one_context(
         adapter_logits_tensor = adapter_logits_tensor_full[:effective_len]
         labels = labels_full[:effective_len]
 
-        # Per-position weights: full weight before first mismatch, decayed after.
+        # Per-position weights: full weight up to and including first_mismatch
+        # (the mismatch position has correct input, only its output was wrong),
+        # decayed weight strictly after first_mismatch (those positions had
+        # wrong-token inputs and are OOD relative to inference).
         device = adapter_logits_tensor.device
         weights = torch.ones(effective_len, device=device, dtype=adapter_logits_tensor.dtype)
-        if 0 <= first_mismatch < effective_len:
-            weights[first_mismatch:] = post_mismatch_weight
+        if 0 <= first_mismatch < effective_len - 1:
+            weights[first_mismatch + 1:] = post_mismatch_weight
 
         ce_per_token = F.cross_entropy(adapter_logits_tensor, labels, reduction='none')
         loss = (ce_per_token * weights).sum() / weights.sum().clamp_min(1.0)
