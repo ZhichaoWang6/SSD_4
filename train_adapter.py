@@ -41,6 +41,13 @@ def parse_args():
                         help="Disable the adapter MLP block and keep an attention-only adapter.")
     parser.add_argument("--resume_adapter", type=str, default=None,
                         help="Path to pretrained adapter_model.bin to continue training from")
+    parser.add_argument("--loss_mode", type=str, default="sharp_kd",
+                        choices=["soft_kd", "sharp_kd", "hard_ce"],
+                        help="soft_kd: original full-distribution KD (T=1). "
+                             "sharp_kd: temperature-sharpened KD (recommended, boosts confidence). "
+                             "hard_ce: cross-entropy on teacher argmax (most aggressive).")
+    parser.add_argument("--kd_temperature", type=float, default=0.5,
+                        help="Temperature for sharp_kd. <1.0 sharpens teacher distribution.")
     return parser.parse_args()
 
 
@@ -126,9 +133,30 @@ def save_adapter(model, adapter_config, args, accelerator, tag):
     print(f"  Saved [{tag}] to {save_dir}")
 
 
-def compute_distill_loss(out_head, target_head, loss_mask):
-    target_p = F.softmax(target_head, dim=2).detach()
-    out_logp = F.log_softmax(out_head, dim=2)
+def compute_distill_loss(out_head, target_head, loss_mask, mode="sharp_kd", temperature=0.5):
+    """
+    out_head:    [B, L, V] adapter logits
+    target_head: [B, L, V] full-model logits (teacher)
+    loss_mask:   [B, L, 1]
+    """
+    if mode == "hard_ce":
+        labels = target_head.argmax(dim=-1).detach()  # [B, L]
+        B, L, V = out_head.shape
+        per_token = F.cross_entropy(
+            out_head.reshape(-1, V),
+            labels.reshape(-1),
+            reduction="none",
+        ).reshape(B, L)
+        mask = loss_mask.squeeze(-1)
+        return (per_token * mask).sum() / mask.sum().clamp_min(1.0)
+
+    if mode == "sharp_kd":
+        T = max(temperature, 1e-3)
+    else:  # soft_kd
+        T = 1.0
+
+    target_p = F.softmax(target_head / T, dim=2).detach()
+    out_logp = F.log_softmax(out_head / T, dim=2)
     distill_loss = -torch.sum(torch.sum(loss_mask * (target_p * out_logp), 2)) / loss_mask.sum().clamp(min=1)
     return distill_loss
 
@@ -257,6 +285,8 @@ def main():
         print(f"Updates per epoch: {updates_per_epoch}")
         print(f"Total optimizer steps: {total_training_steps}")
         print(f"Warmup steps: {warmup_steps}")
+        print(f"Loss mode: {args.loss_mode}"
+              + (f" (T={args.kd_temperature})" if args.loss_mode == "sharp_kd" else ""))
 
     if args.start_epoch > 0 and not args.resume_adapter:
         state_dir = os.path.join(args.outdir, "state", f"state_{args.start_epoch - 1}")
@@ -294,7 +324,13 @@ def main():
                 prob_acc_per_token = torch.min(prob_last, prob_exit).sum(dim=2)
 
                 loss_mask = data["loss_mask"][:, :, None]
-                loss = compute_distill_loss(out_head=out_head, target_head=target_head, loss_mask=loss_mask)
+                loss = compute_distill_loss(
+                    out_head=out_head,
+                    target_head=target_head,
+                    loss_mask=loss_mask,
+                    mode=args.loss_mode,
+                    temperature=args.kd_temperature,
+                )
                 prob_acc = torch.sum(data["loss_mask"] * prob_acc_per_token) / data["loss_mask"].sum().clamp(min=1)
 
                 nan_flag = torch.tensor(
