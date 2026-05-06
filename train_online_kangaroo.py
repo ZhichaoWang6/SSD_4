@@ -35,6 +35,10 @@ def parse_args():
     parser.add_argument("--answer_margin_tokens", type=int, default=4)
     parser.add_argument("--speculative_steps", type=int, default=6)
     parser.add_argument("--threshold", type=float, default=0.0)
+    parser.add_argument("--post_mismatch_weight", type=float, default=0.3,
+                        help="Weight applied to per-token CE loss at and after the first "
+                             "draft/verify mismatch. 1.0 = full weight everywhere; "
+                             "0.0 = old behavior (only train on prefix).")
 
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--no_reply_keep_ratio", type=float, default=1.0)
@@ -169,6 +173,7 @@ def online_train_one_context(
     max_new_tokens=128,
     speculative_steps=6,
     threshold=0.0,
+    post_mismatch_weight=0.3,
     debug=False,
     debug_steps=6,
 ):
@@ -364,24 +369,33 @@ def online_train_one_context(
         )
         labels_full = verify_ids[0, :usable_len].detach()
 
-        train_len = usable_len
-
+        # Find first mismatch and first EOS in the verify window.
+        first_mismatch = -1
+        first_eos = -1
         for k in range(usable_len):
             verify_id_k = labels_full[k].item()
             draft_id_k = draft_token_ids[k]
-
+            if first_mismatch < 0 and verify_id_k != draft_id_k:
+                first_mismatch = k
             if verify_id_k in eos_set:
-                train_len = k + 1
+                first_eos = k
                 break
 
-            if verify_id_k != draft_id_k:
-                train_len = k + 1
-                break
+        # Effective training length: cap at first EOS (inclusive); otherwise use full window.
+        effective_len = first_eos + 1 if first_eos >= 0 else usable_len
+        train_len = effective_len
 
-        adapter_logits_tensor = adapter_logits_tensor_full[:train_len]
-        labels = labels_full[:train_len]
+        adapter_logits_tensor = adapter_logits_tensor_full[:effective_len]
+        labels = labels_full[:effective_len]
 
-        loss = F.cross_entropy(adapter_logits_tensor, labels)
+        # Per-position weights: full weight before first mismatch, decayed after.
+        device = adapter_logits_tensor.device
+        weights = torch.ones(effective_len, device=device, dtype=adapter_logits_tensor.dtype)
+        if 0 <= first_mismatch < effective_len:
+            weights[first_mismatch:] = post_mismatch_weight
+
+        ce_per_token = F.cross_entropy(adapter_logits_tensor, labels, reduction='none')
+        loss = (ce_per_token * weights).sum() / weights.sum().clamp_min(1.0)
 
         if total_loss is None:
             total_loss = loss * train_len
@@ -586,6 +600,7 @@ def main():
                     max_new_tokens=turn_max_new_tokens,
                     speculative_steps=args.speculative_steps,
                     threshold=args.threshold,
+                    post_mismatch_weight=args.post_mismatch_weight,
                     debug=args.debug and global_step < args.debug_steps,
                     debug_steps=args.debug_steps,
                 )
