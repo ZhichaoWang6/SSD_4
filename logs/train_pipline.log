@@ -1,0 +1,48 @@
+Traceback (most recent call last):
+  File "/data/wangzhichao/projects/SSD_full_history/train_online_kangaroo.py", line 10, in <module>
+    from transformers import AutoProcessor, get_linear_schedule_with_warmup
+  File "<frozen importlib._bootstrap>", line 1075, in _handle_fromlist
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/transformers/utils/import_utils.py", line 1852, in __getattr__
+    value = getattr(module, name)
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/transformers/utils/import_utils.py", line 1851, in __getattr__
+    module = self._get_module(self._class_to_module[name])
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/transformers/utils/import_utils.py", line 1863, in _get_module
+    return importlib.import_module("." + module_name, self.__name__)
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/importlib/__init__.py", line 126, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/transformers/models/auto/processing_auto.py", line 28, in <module>
+    from ...image_processing_utils import ImageProcessingMixin
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/transformers/image_processing_utils.py", line 22, in <module>
+    from .image_transforms import center_crop, normalize, rescale
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/transformers/image_transforms.py", line 22, in <module>
+    from .image_utils import (
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/transformers/image_utils.py", line 65, in <module>
+    from torchvision import io as torchvision_io
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/torchvision/__init__.py", line 10, in <module>
+    from torchvision import _meta_registrations, datasets, io, models, ops, transforms, utils  # usort:skip
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/torchvision/models/__init__.py", line 2, in <module>
+    from .convnext import *
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/torchvision/models/convnext.py", line 8, in <module>
+    from ..ops.misc import Conv2dNormActivation, Permute
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/torchvision/ops/__init__.py", line 23, in <module>
+    from .poolers import MultiScaleRoIAlign
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/torchvision/ops/poolers.py", line 10, in <module>
+    from .roi_align import roi_align
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/torchvision/ops/roi_align.py", line 7, in <module>
+    from torch._dynamo.utils import is_compile_supported
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/torch/_dynamo/__init__.py", line 2, in <module>
+    from . import convert_frame, eval_frame, resume_execution
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/torch/_dynamo/convert_frame.py", line 48, in <module>
+    from . import config, exc, trace_rules
+  File "/home/wangzhichao/anaconda3/envs/MMDuet2-infer/lib/python3.10/site-packages/torch/_dynamo/trace_rules.py", line 45, in <module>
+    import torch._inductor.test_operators
+  File "<frozen importlib._bootstrap>", line 1027, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1002, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 945, in _find_spec
+  File "<frozen importlib._bootstrap_external>", line 1439, in find_spec
+  File "<frozen importlib._bootstrap_external>", line 1411, in _get_spec
+  File "<frozen importlib._bootstrap_external>", line 1577, in find_spec
+  File "<frozen importlib._bootstrap_external>", line 161, in _path_isfile
+  File "<frozen importlib._bootstrap_external>", line 153, in _path_is_mode_type
+  File "<frozen importlib._bootstrap_external>", line 147, in _path_stat
+KeyboardInterrupt
