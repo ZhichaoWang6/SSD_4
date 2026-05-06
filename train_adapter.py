@@ -476,6 +476,7 @@ def main():
                 f"epoch{epoch:03d}"
                 f"_acc{epoch_acc:.4f}"
                 f"_accept{epoch_accept:.4f}"
+                f"_longconf{epoch_long_confidence:.4f}"
                 f"_loss{epoch_loss:.4f}"
             )
             save_adapter(model, adapter_config, args, accelerator, epoch_tag)

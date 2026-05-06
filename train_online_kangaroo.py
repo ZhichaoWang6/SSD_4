@@ -80,8 +80,17 @@ def freeze_base_train_adapter(model):
         p.requires_grad = True
 
 
-def save_adapter(model, outdir, epoch):
-    save_dir = os.path.join(outdir, f"epoch_{epoch:03d}")
+def save_adapter(model, outdir, epoch, metrics=None):
+    if metrics:
+        tag = (
+            f"epoch{epoch:03d}"
+            f"_accept{metrics.get('accept', 0.0):.3f}"
+            f"_acc{metrics.get('acc', 0.0):.3f}"
+            f"_loss{metrics.get('loss', 0.0):.3f}"
+        )
+    else:
+        tag = f"epoch_{epoch:03d}"
+    save_dir = os.path.join(outdir, tag)
     os.makedirs(save_dir, exist_ok=True)
 
     torch.save(model.adapter_model.state_dict(), os.path.join(save_dir, "adapter_model.bin"))
@@ -90,6 +99,8 @@ def save_adapter(model, outdir, epoch):
         "exit_layer": model.early_exit_layer,
         "use_mlp": getattr(model.adapter_model.layers[0], "use_mlp", True),
     }
+    if metrics:
+        adapter_config["metrics"] = metrics
 
     with open(os.path.join(save_dir, "adapter_config.json"), "w", encoding="utf-8") as f:
         json.dump(adapter_config, f, indent=2)
@@ -673,13 +684,22 @@ def main():
                         f" | NO_REPLY_skipped {skipped_no_reply}"
                     )
 
+        epoch_metrics = {
+            "loss": (epoch_loss / seen) if seen else 0.0,
+            "acc": (epoch_acc / seen) if seen else 0.0,
+            "accept": (epoch_accept / seen) if seen else 0.0,
+            "avg_tokens": (epoch_tokens / seen) if seen else 0.0,
+            "seen": seen,
+            "long_seen": seen_long_reply,
+            "no_reply_seen": seen_no_reply,
+        }
         if seen > 0:
             print(
                 f"Epoch {epoch}"
-                f" | Loss {epoch_loss / seen:.4f}"
-                f" | Acc {epoch_acc / seen:.3f}"
-                f" | AvgAccept {epoch_accept / seen:.2f}"
-                f" | AvgTokens {epoch_tokens / seen:.2f}"
+                f" | Loss {epoch_metrics['loss']:.4f}"
+                f" | Acc {epoch_metrics['acc']:.3f}"
+                f" | AvgAccept {epoch_metrics['accept']:.2f}"
+                f" | AvgTokens {epoch_metrics['avg_tokens']:.2f}"
                 f" | Seen {seen}"
                 f" | NO_REPLY_seen {seen_no_reply}"
                 f" | LONG_seen {seen_long_reply}"
@@ -688,9 +708,9 @@ def main():
             )
 
         if epoch % args.save_freq == 0:
-            save_adapter(model, args.outdir, epoch)
+            save_adapter(model, args.outdir, epoch, metrics=epoch_metrics)
 
-    save_adapter(model, args.outdir, args.num_epochs)
+    save_adapter(model, args.outdir, args.num_epochs, metrics=epoch_metrics)
 
 
 if __name__ == "__main__":
