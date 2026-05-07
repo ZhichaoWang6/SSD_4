@@ -84,8 +84,9 @@ def save_adapter(model, outdir, epoch, metrics=None):
     if metrics:
         tag = (
             f"epoch{epoch:03d}"
+            f"_LONGaccept{metrics.get('long_accept', 0.0):.3f}"
+            f"_LONGacc{metrics.get('long_acc', 0.0):.3f}"
             f"_accept{metrics.get('accept', 0.0):.3f}"
-            f"_acc{metrics.get('acc', 0.0):.3f}"
             f"_loss{metrics.get('loss', 0.0):.3f}"
         )
     else:
@@ -590,6 +591,12 @@ def main():
         epoch_accept = 0.0
         epoch_tokens = 0
 
+        long_loss = 0.0
+        long_acc = 0.0
+        long_accept = 0.0
+        no_reply_acc = 0.0
+        no_reply_accept = 0.0
+
         seen = 0
         seen_no_reply = 0
         seen_long_reply = 0
@@ -662,8 +669,13 @@ def main():
 
                 if is_no_reply:
                     seen_no_reply += 1
+                    no_reply_acc += result["acc"]
+                    no_reply_accept += result["avg_accept"]
                 else:
                     seen_long_reply += 1
+                    long_loss += loss.item()
+                    long_acc += result["acc"]
+                    long_accept += result["avg_accept"]
 
                 epoch_loss += loss.item()
                 epoch_acc += result["acc"]
@@ -692,10 +704,16 @@ def main():
             "seen": seen,
             "long_seen": seen_long_reply,
             "no_reply_seen": seen_no_reply,
+            # Per-type metrics — long is what matters for real speedup.
+            "long_loss":   (long_loss / seen_long_reply) if seen_long_reply else 0.0,
+            "long_acc":    (long_acc / seen_long_reply) if seen_long_reply else 0.0,
+            "long_accept": (long_accept / seen_long_reply) if seen_long_reply else 0.0,
+            "no_reply_acc":    (no_reply_acc / seen_no_reply) if seen_no_reply else 0.0,
+            "no_reply_accept": (no_reply_accept / seen_no_reply) if seen_no_reply else 0.0,
         }
         if seen > 0:
             print(
-                f"Epoch {epoch}"
+                f"Epoch {epoch} [overall]"
                 f" | Loss {epoch_metrics['loss']:.4f}"
                 f" | Acc {epoch_metrics['acc']:.3f}"
                 f" | AvgAccept {epoch_metrics['accept']:.2f}"
@@ -705,6 +723,19 @@ def main():
                 f" | LONG_seen {seen_long_reply}"
                 f" | NO_REPLY_skipped {skipped_no_reply}"
                 f" | no_reply_keep_ratio {args.no_reply_keep_ratio}"
+            )
+            print(
+                f"Epoch {epoch} [LONG]"
+                f" | Loss {epoch_metrics['long_loss']:.4f}"
+                f" | Acc {epoch_metrics['long_acc']:.3f}"
+                f" | AvgAccept {epoch_metrics['long_accept']:.2f}"
+                f"  ({seen_long_reply} samples)"
+            )
+            print(
+                f"Epoch {epoch} [NO_REPLY]"
+                f" | Acc {epoch_metrics['no_reply_acc']:.3f}"
+                f" | AvgAccept {epoch_metrics['no_reply_accept']:.2f}"
+                f"  ({seen_no_reply} samples)"
             )
 
         if epoch % args.save_freq == 0:
