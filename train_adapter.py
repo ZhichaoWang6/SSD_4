@@ -57,6 +57,12 @@ def parse_args():
                         help="Auxiliary smooth-L1 loss weight between adapter output hidden "
                              "state and base final hidden state. 0.0 = disabled. "
                              "Recommended: 0.5.")
+    parser.add_argument("--init_from_base_layer", type=int, default=-1,
+                        help="If >=0, initialize adapter weights from this layer of the base "
+                             "model (also copies the final norm). EAGLE-style trick to inherit "
+                             "long-context attention patterns from pretrained base. "
+                             "-1 = disabled. Common choices: same as --exit_layer (e.g. 6), "
+                             "or num_hidden_layers - 1 (last layer).")
     return parser.parse_args()
 
 
@@ -150,6 +156,84 @@ class DataCollatorWithPadding:
             "loss_mask": torch.tensor([item["loss_mask"] + [0] * (max_length - len(item["loss_mask"])) for item in features]),
             "attention_mask": torch.tensor([item["attention_mask"] + [0] * (max_length - len(item["attention_mask"])) for item in features]),
         }
+
+
+def init_adapter_from_base_layer(adapter_model, base_model_path, source_layer):
+    """Initialize adapter's single decoder layer from base.layers[source_layer].
+    Also copies base.norm into adapter.norm. EAGLE-style init.
+    Returns number of parameters successfully copied.
+    """
+    from safetensors import safe_open
+
+    layer_prefix = f"model.layers.{source_layer}."
+    norm_key = "model.norm.weight"
+
+    index_path = os.path.join(base_model_path, "model.safetensors.index.json")
+    weights = {}
+    if os.path.exists(index_path):
+        with open(index_path, "r") as f:
+            weight_map = json.loads(f.read())["weight_map"]
+        files_needed = set()
+        for key, fname in weight_map.items():
+            if key.startswith(layer_prefix) or key == norm_key:
+                files_needed.add(fname)
+        for fname in files_needed:
+            with safe_open(os.path.join(base_model_path, fname), framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    if key.startswith(layer_prefix) or key == norm_key:
+                        weights[key] = f.get_tensor(key)
+    else:
+        single = os.path.join(base_model_path, "model.safetensors")
+        if os.path.exists(single):
+            with safe_open(single, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    if key.startswith(layer_prefix) or key == norm_key:
+                        weights[key] = f.get_tensor(key)
+        else:
+            raise FileNotFoundError(f"No safetensors index or single file in {base_model_path}")
+
+    if not weights:
+        raise RuntimeError(f"No weights found for layer {source_layer} in {base_model_path}.")
+
+    mappings = {
+        f"{layer_prefix}self_attn.q_proj.weight":         "layers.0.self_attn.q_proj.weight",
+        f"{layer_prefix}self_attn.q_proj.bias":           "layers.0.self_attn.q_proj.bias",
+        f"{layer_prefix}self_attn.k_proj.weight":         "layers.0.self_attn.k_proj.weight",
+        f"{layer_prefix}self_attn.k_proj.bias":           "layers.0.self_attn.k_proj.bias",
+        f"{layer_prefix}self_attn.v_proj.weight":         "layers.0.self_attn.v_proj.weight",
+        f"{layer_prefix}self_attn.v_proj.bias":           "layers.0.self_attn.v_proj.bias",
+        f"{layer_prefix}self_attn.o_proj.weight":         "layers.0.self_attn.o_proj.weight",
+        f"{layer_prefix}input_layernorm.weight":          "layers.0.input_layernorm.weight",
+        f"{layer_prefix}post_attention_layernorm.weight": "layers.0.post_attention_layernorm.weight",
+        f"{layer_prefix}mlp.gate_proj.weight":            "layers.0.gate_proj.weight",
+        f"{layer_prefix}mlp.up_proj.weight":              "layers.0.up_proj.weight",
+        f"{layer_prefix}mlp.down_proj.weight":            "layers.0.down_proj.weight",
+        norm_key:                                         "norm.weight",
+    }
+
+    adapter_state = adapter_model.state_dict()
+    new_state = {}
+    matched, skipped = 0, []
+    n_params = 0
+    for src_key, dst_key in mappings.items():
+        if src_key in weights and dst_key in adapter_state:
+            tensor = weights[src_key]
+            if tensor.shape != adapter_state[dst_key].shape:
+                skipped.append((dst_key, f"shape mismatch {tuple(tensor.shape)} vs {tuple(adapter_state[dst_key].shape)}"))
+                continue
+            new_state[dst_key] = tensor.to(adapter_state[dst_key].dtype)
+            matched += 1
+            n_params += tensor.numel()
+        else:
+            skipped.append((dst_key, f"src key '{src_key}' not in base weights" if src_key not in weights else "dst not in adapter"))
+
+    adapter_state.update(new_state)
+    adapter_model.load_state_dict(adapter_state, strict=False)
+    print(f"[init_adapter_from_base] copied {matched}/{len(mappings)} keys "
+          f"from base layer {source_layer} ({n_params/1e6:.2f}M params)")
+    for dst, reason in skipped:
+        print(f"  [skip] {dst}: {reason}")
+    return matched
 
 
 def save_adapter(model, adapter_config, args, accelerator, tag):
@@ -305,10 +389,16 @@ def main():
         print(f"Adapter config: use_mlp={getattr(adapter_config, 'use_mlp', True)}")
         print(model)
 
+    if args.init_from_base_layer >= 0 and not args.resume_adapter:
+        # All processes must initialize the same weights (called pre-DDP-prepare).
+        init_adapter_from_base_layer(model, args.basepath, args.init_from_base_layer)
+
     if args.resume_adapter:
         state_dict = torch.load(args.resume_adapter, map_location="cpu")
         model.load_state_dict(state_dict)
         print(f"Loaded pretrained adapter from {args.resume_adapter}")
+        if args.init_from_base_layer >= 0:
+            print(f"  (note: --init_from_base_layer was set but ignored because --resume_adapter takes precedence)")
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.95))
     model, head, optimizer, train_loader = accelerator.prepare(
