@@ -407,8 +407,10 @@ def create_adapter_config(base_model_path):
         rope_theta=getattr(base_config, 'rope_theta', 1000000.0),
         pad_token_id=getattr(base_config, 'pad_token_id', 0),
         use_mlp=True,
-        mrope_section=mrope_section,
     )
+    # Qwen2_5_VLConfig doesn't accept mrope_section as a kwarg; set it as
+    # a custom attribute after construction so AdapterAttention can read it.
+    adapter_config.mrope_section = mrope_section
     return adapter_config
 
 
