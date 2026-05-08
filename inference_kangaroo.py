@@ -566,8 +566,25 @@ def kangaroo_speculative_generate(
     global_tokens[:, start_index] = first_token.item()
 
     hidden_state_early = output.hidden_states[early_exit_layer]
+
+    # Compute 3D mRoPE position_ids for prefill, mirroring base.
+    try:
+        prefill_position_ids, _ = base_model.model.get_rope_index(
+            inputs["input_ids"],
+            inputs.get("image_grid_thw"),
+            inputs.get("video_grid_thw"),
+            inputs.get("second_per_grid_ts"),
+            inputs.get("attention_mask"),
+        )
+    except Exception:
+        seq = inputs["input_ids"].shape[1]
+        ar = torch.arange(seq, device=hidden_state_early.device, dtype=torch.long)
+        prefill_position_ids = ar[None, None, :].expand(3, 1, -1).clone()
+    next_pos_text = int(prefill_position_ids[:, 0, -1].max().item()) + 1
+
     _, adapter_past_key_values = adapter_model.forward_early_stop(
         inputs_embeds=hidden_state_early,
+        position_ids=prefill_position_ids.to(hidden_state_early.device),
         use_cache=True,
     )
     _debug_cache(
@@ -648,8 +665,24 @@ def kangaroo_speculative_generate(
                 f"verify_cache={base_model._get_layer_cache_length(early_exit_layer)}"
             )
 
+            # mRoPE position for newly generated text token(s).
+            # For text tokens: T=H=W=next_pos_text+offset. If adapter_input has 2 tokens
+            # (hidden_state_early_last + hidden_state_early), build positions for both.
+            adapter_input_len = adapter_input.shape[1]
+            cur_text_pos = next_pos_text + step
+            if adapter_input_len == 1:
+                pos_vals = [cur_text_pos]
+            else:
+                # 2 tokens: previous (cur-1) + current
+                pos_vals = [cur_text_pos - 1, cur_text_pos]
+            cur_pos_ids = torch.tensor(
+                [[pos_vals], [pos_vals], [pos_vals]],
+                dtype=torch.long, device=adapter_input.device,
+            )  # (3, 1, adapter_input_len)
+
             hidden_state, adapter_past_key_values = adapter_model.forward_early_stop(
                 inputs_embeds=adapter_input,
+                position_ids=cur_pos_ids,
                 past_key_values=adapter_past_key_values,
                 use_cache=True,
             )
@@ -780,6 +813,8 @@ def kangaroo_speculative_generate(
 
         accept_len = start_index - start_index_copy
         accept_length_list.append(accept_len)
+        # Advance running mRoPE text-position counter by accepted tokens (text-style T=H=W).
+        next_pos_text += accept_len
         # print(f"Round {round_idx} accepted length: {accept_len}, total accepted length: {accept_length_list}")
 
         # ---- STEP 4: Trim caches ----
