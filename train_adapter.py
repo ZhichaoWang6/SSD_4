@@ -131,12 +131,19 @@ class AdapterDataset(Dataset):
         length = hidden_state.shape[1]
         attention_mask = [1] * length
 
+        # 3D mRoPE position_ids if saved (shape: (3, seq_len)). If absent,
+        # adapter falls back to 1D arange (text-style T=H=W).
+        position_ids = data.get("position_ids", None)
+        if position_ids is not None:
+            position_ids = position_ids[:, None, :]  # (3, 1, seq_len) — pseudo-batch dim
+
         return {
             "attention_mask": attention_mask,
             "loss_mask": loss_mask_shifted.tolist(),
             "target": hidden_state,
             "hidden_state_big": hidden_state,
             "hidden_state_early": hidden_state_early,
+            "position_ids": position_ids,
         }
 
 
@@ -147,15 +154,32 @@ class DataCollatorWithPadding:
         padding_tensor = torch.zeros(batch, target_len - cur_len, hidden, dtype=intensors.dtype)
         return torch.cat((intensors, padding_tensor), dim=1)
 
+    @staticmethod
+    def padding_position_ids(intensors, target_len):
+        # intensors: (3, 1, seq_len)
+        cur_len = intensors.shape[2]
+        if cur_len >= target_len:
+            return intensors
+        padding = torch.zeros(3, 1, target_len - cur_len, dtype=intensors.dtype)
+        return torch.cat((intensors, padding), dim=2)
+
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         max_length = max(item["hidden_state_big"].shape[1] for item in features)
-        return {
+        out = {
             "hidden_states": torch.cat([self.paddingtensor(item["hidden_state_big"], max_length) for item in features]),
             "hidden_states_early": torch.cat([self.paddingtensor(item["hidden_state_early"], max_length) for item in features]),
             "target": torch.cat([self.paddingtensor(item["target"], max_length) for item in features]),
             "loss_mask": torch.tensor([item["loss_mask"] + [0] * (max_length - len(item["loss_mask"])) for item in features]),
             "attention_mask": torch.tensor([item["attention_mask"] + [0] * (max_length - len(item["attention_mask"])) for item in features]),
         }
+        # Stack 3D position_ids if all features have them; else None.
+        if all(f.get("position_ids") is not None for f in features):
+            pos_padded = [self.padding_position_ids(f["position_ids"], max_length) for f in features]
+            # Each is (3, 1, max_length); cat along batch dim → (3, B, max_length).
+            out["position_ids"] = torch.cat(pos_padded, dim=1)
+        else:
+            out["position_ids"] = None
+        return out
 
 
 def init_adapter_from_base_layer(adapter_model, base_model_path, source_layer):
@@ -449,6 +473,7 @@ def main():
                 predict = model(
                     inputs_embeds=data["hidden_states_early"],
                     attention_mask=data["attention_mask"],
+                    position_ids=data.get("position_ids"),
                 )
 
                 with torch.no_grad():

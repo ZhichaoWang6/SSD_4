@@ -201,6 +201,20 @@ def process_turn(model, processor, context: list, asst_turn: dict, exit_layers: 
         "loss_mask": loss_mask.cpu(),
     }
 
+    # Compute 3D mRoPE position_ids using base.get_rope_index.
+    # Shape: (3, batch=1, seq_len) → save as (3, seq_len).
+    try:
+        position_ids, _ = model.get_rope_index(
+            inputs["input_ids"],
+            inputs.get("image_grid_thw"),
+            inputs.get("video_grid_thw"),
+            inputs.get("second_per_grid_ts"),
+            inputs.get("attention_mask"),
+        )
+        result["position_ids"] = position_ids.cpu()[:, 0]  # (3, seq_len)
+    except Exception as e:
+        print(f"  [WARN] get_rope_index failed: {e}; saving without position_ids")
+
     for layer in exit_layers:
         if layer < len(outputs.hidden_states):
             result[f"hidden_state_layer{layer}"] = outputs.hidden_states[layer].float().cpu()[0]

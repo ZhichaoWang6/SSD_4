@@ -249,9 +249,30 @@ def online_train_one_context(
 
         hidden_state_early = output.hidden_states[model.early_exit_layer]
 
+        # Compute 3D mRoPE position_ids for the prefill context.
+        # Shape: (3, batch=1, seq_len). Track the per-channel max so we can
+        # extend for newly generated text tokens (T=H=W=max+offset).
+        try:
+            prefill_position_ids, _ = base_model.model.get_rope_index(
+                inputs["input_ids"],
+                inputs.get("image_grid_thw"),
+                inputs.get("video_grid_thw"),
+                inputs.get("second_per_grid_ts"),
+                inputs.get("attention_mask"),
+            )
+        except Exception:
+            # Fallback: 1D arange broadcast to 3 channels.
+            seq = inputs["input_ids"].shape[1]
+            ar = torch.arange(seq, device=device, dtype=torch.long)
+            prefill_position_ids = ar[None, None, :].expand(3, 1, -1).clone()
+        # next_pos_text: position_id (single int, T=H=W) for the next text token to generate.
+        next_pos_text = int(prefill_position_ids[:, 0, -1].max().item()) + 1
+
     with torch.no_grad():
+        # Pass the prefill position_ids to adapter for proper mRoPE.
         _, adapter_past_key_values = adapter_model.forward_early_stop(
             inputs_embeds=hidden_state_early.detach(),
+            position_ids=prefill_position_ids.to(device),
             use_cache=True,
         )
 
@@ -320,8 +341,15 @@ def online_train_one_context(
                     print(f"[draft] step={step} reached bonus/limit; no adapter prediction")
                 break
 
+            # mRoPE position for this newly generated text token: T=H=W=next_pos_text+step.
+            cur_text_pos = next_pos_text + step
+            cur_pos_ids = torch.tensor(
+                [[[cur_text_pos]], [[cur_text_pos]], [[cur_text_pos]]],
+                dtype=torch.long, device=device,
+            )  # (3, 1, 1)
             hidden_state, adapter_past_key_values = adapter_model.forward_early_stop(
                 inputs_embeds=hidden_state_early.detach(),
+                position_ids=cur_pos_ids,
                 past_key_values=adapter_past_key_values,
                 use_cache=True,
             )
@@ -485,6 +513,9 @@ def online_train_one_context(
 
         accept_len = start_index - start_copy
         accept_lengths.append(accept_len)
+
+        # Advance the running mRoPE text-position by however many tokens were actually accepted.
+        next_pos_text += accept_len
 
         base_model.trim_draft_layers_cache(start_index)
         base_model.trim_verify_layers_cache(start_index)

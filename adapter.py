@@ -29,8 +29,43 @@ class RMSNorm(nn.Module):
         return self.weight * hidden_states.to(input_dtype)
 
 
+class MultimodalRotaryEmbedding(nn.Module):
+    """3D mRoPE for Qwen2.5-VL style multimodal position encoding.
+
+    Accepts position_ids of shape (3, batch, seq_len) where the 3 channels
+    are (T, H, W). For pure text tokens T=H=W=sequence position.
+    Returns cos/sin of shape (3, batch, seq_len, head_dim).
+    """
+
+    def __init__(self, dim, max_position_embeddings=32768, base=1000000.0):
+        super().__init__()
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    @torch.no_grad()
+    def forward(self, position_ids):
+        # position_ids: (3, batch, seq_len) for 3D mRoPE
+        # Or (batch, seq_len) for 1D — auto-broadcast to 3 channels (text-style T=H=W).
+        if position_ids.dim() == 2:
+            position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+        # position_ids: (3, batch, seq_len)
+        position_ids_f = position_ids.float()
+        # inv_freq: (dim/2,)  →  broadcast to (1, 1, 1, dim/2)
+        # position_ids: (3, batch, seq_len)  →  unsqueeze to (3, batch, seq_len, 1)
+        # freqs: (3, batch, seq_len, dim/2)
+        freqs = position_ids_f.unsqueeze(-1) * self.inv_freq[None, None, None, :].float()
+        emb = torch.cat([freqs, freqs], dim=-1)  # (3, batch, seq_len, dim)
+        cos = emb.cos()
+        sin = emb.sin()
+        return cos, sin
+
+
+# Kept for backward compatibility (unused after switching to mRoPE).
 class RotaryEmbedding(nn.Module):
-    """Standard 1D rotary position embeddings for the adapter."""
+    """Standard 1D rotary position embeddings (legacy)."""
 
     def __init__(self, dim, max_position_embeddings=32768, base=1000000.0):
         super().__init__()
@@ -42,7 +77,6 @@ class RotaryEmbedding(nn.Module):
 
     @torch.no_grad()
     def forward(self, position_ids):
-        # position_ids: (batch, seq_len)
         inv_freq_expanded = self.inv_freq[None, :, None].expand(position_ids.shape[0], -1, 1).float()
         position_ids_expanded = position_ids[:, None, :].float()
         freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
@@ -59,8 +93,30 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
+def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section):
+    """
+    cos, sin: (3, batch, seq_len, head_dim)
+    mrope_section: list of 3 ints summing to head_dim/2
+                   e.g. [16, 24, 24] for head_dim=128.
+    """
+    # mrope_section halves are doubled because cos/sin span full head_dim.
+    section = list(mrope_section) * 2  # e.g. [16, 24, 24, 16, 24, 24]
+    # cos.split(section, dim=-1) → 6 chunks of (3, batch, seq_len, ...)
+    # For chunk i, take channel i % 3 (T/H/W repeating).
+    cos = torch.cat(
+        [m[i % 3] for i, m in enumerate(cos.split(section, dim=-1))], dim=-1
+    ).unsqueeze(1)  # (batch, 1, seq_len, head_dim)
+    sin = torch.cat(
+        [m[i % 3] for i, m in enumerate(sin.split(section, dim=-1))], dim=-1
+    ).unsqueeze(1)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
 def apply_rotary_pos_emb(q, k, cos, sin):
-    cos = cos.unsqueeze(1)  # (batch, 1, seq_len, dim)
+    """Legacy 1D RoPE (unused)."""
+    cos = cos.unsqueeze(1)
     sin = sin.unsqueeze(1)
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
@@ -93,7 +149,9 @@ class AdapterAttention(nn.Module):
 
         rope_theta = getattr(config, 'rope_theta', 1000000.0)
         max_pos = getattr(config, 'max_position_embeddings', 32768)
-        self.rotary_emb = RotaryEmbedding(self.head_dim, max_position_embeddings=max_pos, base=rope_theta)
+        self.rotary_emb = MultimodalRotaryEmbedding(self.head_dim, max_position_embeddings=max_pos, base=rope_theta)
+        # mrope_section: how head_dim/2 is split into (T, H, W). Read from config; default for Qwen2.5-VL.
+        self.mrope_section = getattr(config, 'mrope_section', [16, 24, 24])
 
     def forward(
         self,
@@ -111,7 +169,9 @@ class AdapterAttention(nn.Module):
         value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         cos, sin = self.rotary_emb(position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = apply_multimodal_rotary_pos_emb(
+            query_states, key_states, cos, sin, self.mrope_section
+        )
 
         # 统一dtype，防止RoPE引入的float32和其他张量不一致
         query_states = query_states.to(target_dtype)
@@ -268,16 +328,23 @@ class AdapterModel(nn.Module):
             past_key_values_length = past_key_values[0][0].shape[2]
 
         if position_ids is None:
+            # Default: 1D arange. mRoPE will auto-broadcast to 3 channels (text-style T=H=W).
             device = inputs_embeds.device
             position_ids = torch.arange(
                 past_key_values_length, past_key_values_length + seq_length,
                 dtype=torch.long, device=device,
             ).unsqueeze(0).expand(batch_size, -1)
         else:
-            # Flatten 3D mRoPE position_ids to 1D if needed (take first channel)
+            # Accept 3D mRoPE position_ids (3, batch, seq_len) or 2D (batch, seq_len).
+            # mRoPE forward handles the dim==2 case by auto-broadcasting.
             if position_ids.dim() == 3:
-                position_ids = position_ids[0]  # (batch, seq_len) - use temporal dim
-            position_ids = position_ids.view(batch_size, seq_length).long()
+                # (3, batch, seq_len)
+                assert position_ids.shape[0] == 3, (
+                    f"Expected 3 channels (T,H,W), got {position_ids.shape[0]}"
+                )
+                position_ids = position_ids.long()
+            else:
+                position_ids = position_ids.view(batch_size, seq_length).long()
 
         seq_length_with_past = seq_length + past_key_values_length
         if attention_mask is None:
@@ -326,6 +393,9 @@ class AdapterModel(nn.Module):
 def create_adapter_config(base_model_path):
     """Create adapter config from base model config"""
     base_config = AutoConfig.from_pretrained(base_model_path)
+    # Read mrope_section from base config's rope_scaling.
+    rope_scaling = getattr(base_config, 'rope_scaling', None) or {}
+    mrope_section = rope_scaling.get('mrope_section', [16, 24, 24])
     adapter_config = type(base_config)(
         hidden_size=base_config.hidden_size,
         num_attention_heads=base_config.num_attention_heads,
@@ -337,6 +407,7 @@ def create_adapter_config(base_model_path):
         rope_theta=getattr(base_config, 'rope_theta', 1000000.0),
         pad_token_id=getattr(base_config, 'pad_token_id', 0),
         use_mlp=True,
+        mrope_section=mrope_section,
     )
     return adapter_config
 
